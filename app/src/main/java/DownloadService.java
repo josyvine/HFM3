@@ -11,7 +11,6 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.IBinder;
-import android.os.Looper;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -53,6 +52,7 @@ public class DownloadService extends Service {
     private static final String NOTIFICATION_CHANNEL_ID = "DownloadServiceChannel";
     private static final int NOTIFICATION_ID = 1002;
 
+    // --- NEW: Actions and Extras for broadcasting the error report ---
     public static final String ACTION_DOWNLOAD_ERROR = "com.hfm.app.action.DOWNLOAD_ERROR";
     public static final String EXTRA_ERROR_MESSAGE = "com.hfm.app.extra.ERROR_MESSAGE";
 
@@ -93,7 +93,7 @@ public class DownloadService extends Service {
         return START_NOT_STICKY;
     }
 
-    private void startDownloadProcess(final String docId, final String senderId, final String originalFilename, final String cloakedFilename, final long totalSize) {
+    private void startDownloadProcess(String docId, String senderId, final String originalFilename, final String cloakedFilename, final long totalSize) {
         final DocumentReference docRef = db.collection("drop_requests").document(docId);
         listenForStatusChange(docRef);
 
@@ -104,29 +104,21 @@ public class DownloadService extends Service {
                     stopServiceAndCleanup("Error: Drop request not found.");
                     return;
                 }
-                final String senderIp = documentSnapshot.getString("senderPublicIp");
+                String senderIp = documentSnapshot.getString("senderPublicIp");
                 long senderPortLong = documentSnapshot.getLong("senderPublicPort");
-                final String secretNumber = documentSnapshot.getString("secretNumber");
+                String secretNumber = documentSnapshot.getString("secretNumber");
 
                 if (senderIp == null || senderPortLong == 0 || secretNumber == null) {
                     stopServiceAndCleanup("Error: Incomplete connection details.");
                     return;
                 }
-                final int senderPort = (int) senderPortLong;
-
-                // --- THIS IS THE FIX for NetworkOnMainThreadException ---
-                // The network operation (downloadFile) must be started on a new background thread
-                // because the Firebase onSuccess listener runs on the main UI thread.
-                new Thread(new Runnable() {
-                    @Override
-                    public void run() {
-                        downloadFile(senderIp, senderPort, originalFilename, cloakedFilename, totalSize, secretNumber);
-                    }
-                }).start();
+                int senderPort = (int) senderPortLong;
+                downloadFile(senderIp, senderPort, originalFilename, cloakedFilename, totalSize, secretNumber);
             }
         }).addOnFailureListener(new OnFailureListener() {
             @Override
             public void onFailure(@NonNull Exception e) {
+                // MODIFICATION: Broadcast this failure as well for consistency.
                 Intent errorIntent = new Intent(ACTION_DOWNLOAD_ERROR);
                 errorIntent.putExtra(EXTRA_ERROR_MESSAGE, "Error: Could not retrieve drop details.\n\n" + getStackTraceAsString(e));
                 LocalBroadcastManager.getInstance(DownloadService.this).sendBroadcast(errorIntent);
@@ -227,6 +219,7 @@ public class DownloadService extends Service {
                     }
                 } else {
                     db.collection("drop_requests").document(dropRequestId).update("status", "error");
+                    // MODIFICATION: Broadcast the decryption failure instead of showing a toast.
                     Intent errorIntent = new Intent(ACTION_DOWNLOAD_ERROR);
                     errorIntent.putExtra(EXTRA_ERROR_MESSAGE, "Decryption failed. The secret number may be incorrect or the file may be corrupt.");
                     LocalBroadcastManager.getInstance(this).sendBroadcast(errorIntent);
@@ -238,10 +231,12 @@ public class DownloadService extends Service {
 
         } catch (Exception e) {
             Log.e(TAG, "Download process failed.", e);
+            // --- MODIFICATION: This is the main change to fix the "Error null" toast. ---
+            // Instead of showing a toast with a potentially null message, broadcast the full error details.
             Intent errorIntent = new Intent(ACTION_DOWNLOAD_ERROR);
             errorIntent.putExtra(EXTRA_ERROR_MESSAGE, getStackTraceAsString(e));
             LocalBroadcastManager.getInstance(this).sendBroadcast(errorIntent);
-            stopServiceAndCleanup(null);
+            stopServiceAndCleanup(null); // Stop service without a toast.
         } finally {
             try { if (socket != null) socket.close(); } catch (IOException ignored) {}
             try { if (fos != null) fos.close(); } catch (IOException ignored) {}
@@ -251,6 +246,7 @@ public class DownloadService extends Service {
         }
     }
 
+    // --- NEW: Method to generate the full error string from an exception ---
     private String getStackTraceAsString(Exception e) {
         StringWriter sw = new StringWriter();
         PrintWriter pw = new PrintWriter(sw);
